@@ -1,0 +1,128 @@
+---
+# 1. PersistentVolumeClaim - 用于持久化 Grafana 配置、仪表盘、插件等
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: monitoring   # 建议放在 monitoring 命名空间，与 Prometheus 一致
+  labels:
+    app: grafana
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi          # 根据需要调整大小
+  # storageClassName: "standard"   # 根据您的集群存储类取消注释并修改（阿里云可填 managed-csi 等）
+
+---
+# 2. ConfigMap - 预置 Prometheus 数据源（简化初次配置）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  prometheus.yaml: |-
+    apiVersion: 1
+    datasources:
+    - name: Prometheus
+      type: prometheus
+      access: proxy
+      url: http://localhost:9090  # 替换为您的 Prometheus Service 名称和端口
+      isDefault: true
+      jsonData:
+        timeInterval: 30s
+      editable: true
+
+---
+# 3. Deployment - Grafana 主部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        fsGroup: 472          # Grafana 镜像默认运行用户组
+      containers:
+      - name: grafana
+        image: grafana/grafana:11.3.0   
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+        env:
+        - name: GF_SECURITY_ADMIN_USER
+          value: "admin"                  # 初始用户名
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "****"               # 初始密码（生产环境请改用 Secret）
+        - name: GF_USERS_ALLOW_SIGN_UP
+          value: "false"                  # 禁止自注册
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "false"
+        volumeMounts:
+        - name: storage
+          mountPath: /var/lib/grafana     # 持久化目录
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: grafana-pvc
+      - name: datasources
+        configMap:
+          name: grafana-datasources
+
+---
+# 4. Service - 暴露 Grafana 服务
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+    protocol: TCP
+  type: ClusterIP  
